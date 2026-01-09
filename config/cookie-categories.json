@@ -1,0 +1,9 @@
+{
+  "free": {
+    "ads": ["doubleclick.net", "taboola.com"],
+    "tracking": ["trackingdomain.com"]
+  },
+  "premium": {
+    "trackers": ["advancedtracker.com", "analyticsvendor.com"]
+  }
+}
