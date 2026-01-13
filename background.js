@@ -1,21 +1,32 @@
-const STORAGE_KEY = "silentGuardianState";
-
+// ---------- STATE ----------
 let state = {
   cookiesCleared: 0,
   lastClean: null,
   lastError: null
 };
 
-// ---------- LOAD STATE ----------
-chrome.storage.local.get(STORAGE_KEY, (res) => {
-  if (res[STORAGE_KEY]) {
-    state = res[STORAGE_KEY];
-  }
-});
+let whitelist = [];
+let blacklist = [];
 
-// ---------- SAVE STATE ----------
+// ---------- STORAGE ----------
+async function loadState() {
+  const data = await chrome.storage.local.get([
+    "state",
+    "whitelist",
+    "blacklist"
+  ]);
+
+  if (data.state) state = data.state;
+  whitelist = data.whitelist || [];
+  blacklist = data.blacklist || [];
+}
+
 function saveState() {
-  chrome.storage.local.set({ [STORAGE_KEY]: state });
+  chrome.storage.local.set({ state });
+}
+
+function saveLists() {
+  chrome.storage.local.set({ whitelist, blacklist });
 }
 
 // ---------- CLEAN LOGIC ----------
@@ -25,27 +36,43 @@ async function cleanCookies() {
     let removed = 0;
 
     for (const cookie of cookies) {
-      // 1️⃣ ΜΟΝΟ third-party cookies
-      if (cookie.hostOnly) continue;
+      let shouldDelete = false;
 
-      // 2️⃣ ΜΟΝΟ SameSite=None (tracking)
-      if (cookie.sameSite !== "no_restriction") continue;
+      // domain normalize
+      const domain = cookie.domain.replace(/^\./, "");
 
-      // 3️⃣ ΠΡΟΣΤΑΣΙΑ auth cookies (τεράστιο fix)
-      const name = cookie.name.toLowerCase();
-      if (
-        name.includes("sess") ||
-        name.includes("auth") ||
-        name.includes("token") ||
-        name.includes("sid") ||
-        name.includes("login")
-      ) {
-        continue;
+      // whitelist → NEVER delete
+      if (whitelist.some(w => domain.endsWith(w))) continue;
+
+      // blacklist → ALWAYS delete
+      if (blacklist.some(b => domain.endsWith(b))) {
+        shouldDelete = true;
       }
+
+      // otherwise existing logic
+      if (!shouldDelete) {
+        if (cookie.hostOnly) continue;
+        if (cookie.sameSite !== "no_restriction") continue;
+
+        const name = cookie.name.toLowerCase();
+        if (
+          name.includes("sess") ||
+          name.includes("auth") ||
+          name.includes("token") ||
+          name.includes("sid") ||
+          name.includes("login")
+        ) {
+          continue;
+        }
+
+        shouldDelete = true;
+      }
+
+      if (!shouldDelete) continue;
 
       const url =
         (cookie.secure ? "https://" : "http://") +
-        cookie.domain.replace(/^\./, "") +
+        domain +
         cookie.path;
 
       try {
@@ -57,8 +84,11 @@ async function cleanCookies() {
       } catch (_) {}
     }
 
-    state.cookiesCleared += removed;
-    state.lastClean = Date.now();
+    if (removed > 0) {
+      state.cookiesCleared += removed;
+      state.lastClean = Date.now();
+    }
+
     state.lastError = null;
     saveState();
 
@@ -70,26 +100,57 @@ async function cleanCookies() {
   }
 }
 
-// ---------- MESSAGE HANDLER ----------
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+// ---------- MESSAGING ----------
+chrome.runtime.onMessage.addListener((msg, _, sendResponse) => {
   (async () => {
-    switch (msg.type) {
-      case "CLEAN_NOW":
-      case "SMART_PROTECTION":
-      case "BULK_OPT_OUT":
-        sendResponse(await cleanCookies());
-        break;
+    await loadState();
 
-      case "GET_STATUS":
-        sendResponse({
-          active: !state.lastError,
-          cookiesCleared: state.cookiesCleared,
-          lastClean: state.lastClean,
-          error: state.lastError
-        });
-        break;
+    if (msg.type === "CLEAN_NOW") {
+      const res = await cleanCookies();
+      sendResponse({ state, ...res });
+      return;
+    }
+
+    if (msg.type === "GET_STATE") {
+      sendResponse({ state, whitelist, blacklist });
+      return;
+    }
+
+    if (msg.type === "ADD_WHITELIST") {
+      if (!whitelist.includes(msg.domain)) {
+        whitelist.push(msg.domain);
+        saveLists();
+      }
+      sendResponse({ whitelist });
+      return;
+    }
+
+    if (msg.type === "REMOVE_WHITELIST") {
+      whitelist = whitelist.filter(d => d !== msg.domain);
+      saveLists();
+      sendResponse({ whitelist });
+      return;
+    }
+
+    if (msg.type === "ADD_BLACKLIST") {
+      if (!blacklist.includes(msg.domain)) {
+        blacklist.push(msg.domain);
+        saveLists();
+      }
+      sendResponse({ blacklist });
+      return;
+    }
+
+    if (msg.type === "REMOVE_BLACKLIST") {
+      blacklist = blacklist.filter(d => d !== msg.domain);
+      saveLists();
+      sendResponse({ blacklist });
+      return;
     }
   })();
 
-  return true;
+  return true; // keep port alive
 });
+
+// ---------- INIT ----------
+loadState();
